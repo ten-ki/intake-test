@@ -4,12 +4,13 @@ import re
 from google import genai
 import ast
 
-# --- Streamlit UI設定 (絵文字削除) ---
+# --- Streamlit UI設定 ---
 st.set_page_config(page_title="模擬Intakeテスト", layout="wide")
 st.title("模擬Intakeテスト (英語 文法・語彙)")
 st.subheader("抜粋された語句を正しい位置に戻すテストです。")
 
 # --- 初期化 (最重要: 全てのキーをここで確実に定義する) ---
+# このブロックはアプリの最上部で実行され、全てのセッションでキーの存在を保証します。
 if 'test_started' not in st.session_state:
     st.session_state.test_started = False
 if 'score' not in st.session_state:
@@ -20,10 +21,12 @@ if 'correct_answers' not in st.session_state:
     st.session_state.correct_answers = []
 if 'shuffled_words' not in st.session_state:
     st.session_state.shuffled_words = []
-if 'gap_text_display' not in st.session_state: # 表示テキストも初期化
+if 'gap_text_display' not in st.session_state:
     st.session_state.gap_text_display = ""
 if 'feedback' not in st.session_state:
     st.session_state.feedback = []
+if 'is_complete' not in st.session_state: # 採点結果表示用
+    st.session_state.is_complete = False
 
 
 # --- Gemini APIとの連携関数 (変更なし) ---
@@ -64,7 +67,7 @@ def get_word_info_from_gemini(text, num_words):
         if not isinstance(extracted_words_from_api, list):
             raise ValueError("APIレスポンスが有効なリスト形式ではありません。")
     except Exception as e:
-        st.warning(f"⚠️ AIの回答解析に失敗しました。AIの回答: {response_text[:50]}... エラー詳細: {e}")
+        st.warning(f"⚠️ AIの回答解析に失敗しました。AIの回答: {response_text[:50]}...")
         return [], []
 
     all_words = re.findall(r'\b\w+\b', text)
@@ -104,6 +107,15 @@ def create_gap_text(text, words_to_hide):
     final_gap_text = "".join(new_parts)
     return final_gap_text, correct_positions
 
+
+# --- Streamlit ウィジェットのコールバック関数 ---
+# selectboxの値が変更されたときに、st.session_state.user_answersを更新する
+def update_user_answer(index, selected_word):
+    """
+    特定の穴に対応するユーザーの回答をセッションステートに保存するコールバック。
+    """
+    st.session_state.user_answers[f'gap_{index}'] = selected_word
+
 # --- UIとテストの実行 ---
 with st.sidebar:
     st.header("設定")
@@ -122,7 +134,7 @@ with st.sidebar:
         if not user_input.strip():
             st.warning("英文を入力してください。")
         elif "GEMINI_API_KEY" in st.secrets:
-            # 1. 状態をリセット (テスト開始前の状態へ)
+            # 1. 状態をリセット
             st.session_state.test_started = False
             st.session_state.score = None
             st.session_state.user_answers = {}
@@ -130,6 +142,7 @@ with st.sidebar:
             st.session_state.shuffled_words = []
             st.session_state.gap_text_display = ""
             st.session_state.feedback = []
+            st.session_state.is_complete = False
             
             # 2. Gemini API呼び出し
             original_words, shuffled_words = get_word_info_from_gemini(user_input, num_words_to_extract)
@@ -143,14 +156,14 @@ with st.sidebar:
                     original_words
                 )
                 num_gaps = len(st.session_state.correct_answers)
-                st.session_state.user_answers = {f'main_select_{i}': "" for i in range(num_gaps)}
+                # user_answersのキーを 'main_select_{i}' から 'gap_{i}' に変更し、ウィジェットキーとの競合を回避
+                st.session_state.user_answers = {f'gap_{i}': "" for i in range(num_gaps)} 
                 
                 st.experimental_rerun()
             # 失敗した場合は、エラーメッセージは関数内で表示されているため、ここでは何もしない。
 
 
 # --- メイン画面でのテスト表示と採点 ---
-# このブロックに入る前に必要なキーが全て定義されていることを保証 (アプリ冒頭の初期化で対応済み)
 if st.session_state.test_started and st.session_state.correct_answers:
     
     st.markdown("---")
@@ -163,7 +176,6 @@ if st.session_state.test_started and st.session_state.correct_answers:
     selection_options = [""] + st.session_state.shuffled_words
     displayed_text = st.session_state.gap_text_display
     
-    # ... (穴埋めUIのロジックは変更なし) ...
     for i in range(num_gaps):
         gap_marker = f'[GAP_{i}]'
         
@@ -174,17 +186,21 @@ if st.session_state.test_started and st.session_state.correct_answers:
         with col1:
              st.markdown(f"**[{i+1}]**")
         with col2:
-             current_answer = st.session_state.user_answers.get(f'main_select_{i}', "")
+             # user_answersのキーは 'gap_{i}'
+             current_answer = st.session_state.user_answers.get(f'gap_{i}', "")
              initial_index = selection_options.index(current_answer) if current_answer in selection_options else 0
              
-             selected_word = st.selectbox(
+             # ウィジェットのキーは 'select_{i}'
+             st.selectbox(
                  "選択", 
                  options=selection_options,
-                 key=f'main_select_{i}',
+                 key=f'select_{i}', # ウィジェットのキー
                  index=initial_index,
-                 label_visibility='collapsed'
+                 label_visibility='collapsed',
+                 # 👇 コールバック関数を使って、選択と同時にセッションステートを更新
+                 on_change=update_user_answer,
+                 args=(i, st.session_state[f'select_{i}']) 
              )
-             st.session_state.user_answers[f'main_select_{i}'] = selected_word
              
         if len(parts_before_gap) > 1:
             displayed_text = parts_before_gap[1]
@@ -199,7 +215,8 @@ if st.session_state.test_started and st.session_state.correct_answers:
         is_complete = True
         
         for i, correct_word in enumerate(st.session_state.correct_answers):
-            user_word = st.session_state.user_answers.get(f'main_select_{i}')
+            # 参照するセッションステートのキーを 'gap_{i}' に統一
+            user_word = st.session_state.user_answers.get(f'gap_{i}') 
             
             if not user_word:
                 feedback.append(f"穴 {i+1} : **未回答**")
@@ -215,6 +232,7 @@ if st.session_state.test_started and st.session_state.correct_answers:
         st.session_state.score = score
         st.session_state.feedback = feedback
         st.session_state.is_complete = is_complete
+        # 採点結果表示のためにrerun
         st.experimental_rerun()
         
     if st.session_state.score is not None:
