@@ -7,7 +7,7 @@ import ast
 # --- Streamlit UI設定 ---
 st.set_page_config(page_title="模擬Intakeテスト", layout="wide")
 st.title("模擬Intakeテスト (英語 文法・語彙)")
-st.subheader("抜粋された語句を正しい位置に戻すテストです。")
+st.subheader("抜き出された語句を正しい位置に**コピー＆ペースト**で埋めるテストです。")
 
 # --- 初期化 (全てのキーの存在を保証) ---
 if 'test_started' not in st.session_state:
@@ -26,11 +26,14 @@ if 'feedback' not in st.session_state:
     st.session_state.feedback = []
 if 'is_complete' not in st.session_state:
     st.session_state.is_complete = False
+if 'extracted_words_original_order' not in st.session_state:
+    st.session_state.extracted_words_original_order = []
 
-# --- Gemini APIとの連携関数 (省略: 変更なし) ---
+
+# --- Gemini APIとの連携関数 (抜き出し順表示に修正) ---
 def get_word_info_from_gemini(text, num_words):
     if "GEMINI_API_KEY" not in st.secrets:
-        st.error("❌ Gemini APIキーが設定されていません。Streamlit CloudのSecretsを確認してください。")
+        st.error("❌ Gemini APIキーが設定されていません。")
         return [], []
     
     try:
@@ -76,13 +79,14 @@ def get_word_info_from_gemini(text, num_words):
         if word.lower() in api_words_lower and word not in final_extracted_words_original_order:
             final_extracted_words_original_order.append(word)
 
-    shuffled_words = final_extracted_words_original_order[:]
-    random.shuffle(shuffled_words)
+    # ⚠️ 修正点: シャッフルせずに、抜き出し順のリストをそのまま返す
+    shuffled_words = final_extracted_words_original_order[:] 
     
+    # 抜き出した順（元の文章に出現した順）の単語リストも返す
     return final_extracted_words_original_order, shuffled_words
 
 
-# --- 穴埋めテキスト生成ロジック (省略: 変更なし) ---
+# --- 穴埋めテキスト生成ロジック (変更なし) ---
 def create_gap_text(text, words_to_hide):
     correct_positions = []
     parts = re.split(r'(\b\w+\b)', text)
@@ -106,19 +110,9 @@ def create_gap_text(text, words_to_hide):
     return final_gap_text, correct_positions
 
 
-# --- Streamlit ウィジェットのコールバック関数 (修正) ---
-def update_user_answer(index):
-    """
-    特定の穴に対応するユーザーの回答をセッションステートに保存するコールバック。
-    index: 穴のインデックス (0, 1, 2, ...)
-    """
-    widget_key = f'select_{index}'
-    
-    # ウィジェットのキーを参照して、現在の選択値を取得する (これが安全な方法)
-    selected_word = st.session_state[widget_key]
-    
-    # 回答データ用のセッションステートを更新
-    st.session_state.user_answers[f'gap_{index}'] = selected_word
+# --- Streamlit ウィジェットのコールバック関数 (text_input対応のため削除、直接更新へ) ---
+# text_inputはon_changeを必須としないため、この関数は不要になります。
+
 
 # --- UIとテストの実行 ---
 with st.sidebar:
@@ -147,6 +141,7 @@ with st.sidebar:
             st.session_state.gap_text_display = ""
             st.session_state.feedback = []
             st.session_state.is_complete = False
+            st.session_state.extracted_words_original_order = []
             
             # 2. Gemini API呼び出し
             original_words, shuffled_words = get_word_info_from_gemini(user_input, num_words_to_extract)
@@ -155,6 +150,7 @@ with st.sidebar:
             if original_words:
                 st.session_state.test_started = True
                 st.session_state.shuffled_words = shuffled_words
+                st.session_state.extracted_words_original_order = original_words # 抜き出し順リストを保存
                 st.session_state.gap_text_display, st.session_state.correct_answers = create_gap_text(
                     user_input, 
                     original_words
@@ -162,7 +158,7 @@ with st.sidebar:
                 num_gaps = len(st.session_state.correct_answers)
                 st.session_state.user_answers = {f'gap_{i}': "" for i in range(num_gaps)} 
                 
-                st.rerun() # st.experimental_rerun() から st.rerun() へ変更済み
+                st.rerun() 
             # 失敗した場合は、エラーメッセージは関数内で表示されているため、ここでは何もしない。
 
 
@@ -170,13 +166,15 @@ with st.sidebar:
 if st.session_state.test_started and st.session_state.correct_answers:
     
     st.markdown("---")
-    st.markdown("### 1. 抜き出された単語")
-    st.info(f"使用できる単語: {' / '.join(st.session_state.shuffled_words)}")
+    st.markdown("### 1. 抜き出された単語 (出現順) - コピーしてください")
+    
+    # 抜き出し順のリストを表示し、コピーしやすいようにする
+    word_display = f"**`{' / '.join(st.session_state.extracted_words_original_order)}`**"
+    st.markdown(word_display)
 
-    st.markdown("### 2. 穴埋め文章")
+    st.markdown("### 2. 穴埋め文章 (単語をペーストしてください)")
     
     num_gaps = len(st.session_state.correct_answers)
-    selection_options = [""] + st.session_state.shuffled_words
     displayed_text = st.session_state.gap_text_display
     
     for i in range(num_gaps):
@@ -190,18 +188,16 @@ if st.session_state.test_started and st.session_state.correct_answers:
              st.markdown(f"**[{i+1}]**")
         with col2:
              current_answer = st.session_state.user_answers.get(f'gap_{i}', "")
-             initial_index = selection_options.index(current_answer) if current_answer in selection_options else 0
              
-             st.selectbox(
-                 "選択", 
-                 options=selection_options,
-                 key=f'select_{i}',
-                 index=initial_index,
+             # ⚠️ 修正: text_input を使用し、キーを変更
+             selected_word = st.text_input(
+                 "回答", 
+                 value=current_answer,
+                 key=f'input_{i}', # 新しいキーを使用
                  label_visibility='collapsed',
-                 on_change=update_user_answer,
-                 # ⚠️ 修正: 引数としてウィジェットの値ではなく、インデックスのみを渡す
-                 args=(i,) 
              )
+             # text_inputの値が変更されたらセッションステートを即座に更新 (ドラッグ&ドロップのセーブに近い挙動)
+             st.session_state.user_answers[f'gap_{i}'] = selected_word
              
         if len(parts_before_gap) > 1:
             displayed_text = parts_before_gap[1]
@@ -216,16 +212,17 @@ if st.session_state.test_started and st.session_state.correct_answers:
         is_complete = True
         
         for i, correct_word in enumerate(st.session_state.correct_answers):
-            user_word = st.session_state.user_answers.get(f'gap_{i}') 
+            # 採点時は大文字・小文字を区別しない
+            user_word = st.session_state.user_answers.get(f'gap_{i}', "").strip()
             
             if not user_word:
                 feedback.append(f"穴 {i+1} : **未回答**")
                 is_complete = False
                 continue
                 
-            if user_word == correct_word:
+            if user_word.lower() == correct_word.lower(): # 大文字・小文字を無視
                 score += 1
-                feedback.append(f"穴 {i+1} ({correct_word}) : **正解** ✅")
+                feedback.append(f"穴 {i+1} ({user_word}) : **正解** ✅")
             else:
                 feedback.append(f"穴 {i+1} ({user_word}) : **不正解** ❌ (正解: {correct_word})")
         
