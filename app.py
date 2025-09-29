@@ -4,14 +4,12 @@ import re
 from google import genai
 import ast
 
-# --- Streamlit UI設定 ---
+# --- Streamlit UI設定 (絵文字削除) ---
 st.set_page_config(page_title="模擬Intakeテスト", layout="wide")
-# タイトルをご要望の「模擬Intakeテスト」に変更
-st.title("📄 模擬Intakeテスト (英語 文法・語彙)")
+st.title("模擬Intakeテスト (英語 文法・語彙)")
 st.subheader("抜粋された語句を正しい位置に戻すテストです。")
 
-# --- 初期化 ---
-# アプリ実行時にセッションステートのキーを必ず初期化
+# --- 初期化 (最重要: 全てのキーをここで確実に定義する) ---
 if 'test_started' not in st.session_state:
     st.session_state.test_started = False
 if 'score' not in st.session_state:
@@ -22,10 +20,13 @@ if 'correct_answers' not in st.session_state:
     st.session_state.correct_answers = []
 if 'shuffled_words' not in st.session_state:
     st.session_state.shuffled_words = []
+if 'gap_text_display' not in st.session_state: # 表示テキストも初期化
+    st.session_state.gap_text_display = ""
+if 'feedback' not in st.session_state:
+    st.session_state.feedback = []
 
 
-# --- Gemini APIとの連携関数 ---
-# ... (get_word_info_from_gemini 関数は前回のコードから変更なし) ...
+# --- Gemini APIとの連携関数 (変更なし) ---
 def get_word_info_from_gemini(text, num_words):
     if "GEMINI_API_KEY" not in st.secrets:
         st.error("❌ Gemini APIキーが設定されていません。Streamlit CloudのSecretsを確認してください。")
@@ -51,13 +52,11 @@ def get_word_info_from_gemini(text, num_words):
                 contents=prompt
             )
         response_text = response.text.strip()
-        
     except Exception as e:
         st.error(f"❌ Gemini APIの呼び出し中にエラーが発生しました: {e}")
         return [], []
     
     try:
-        # バッククォート（`）などが付いていたら除去して解析
         if response_text.startswith('```'):
             response_text = response_text.replace('```python', '').replace('```json', '').replace('```', '').strip()
             
@@ -82,8 +81,7 @@ def get_word_info_from_gemini(text, num_words):
     return final_extracted_words_original_order, shuffled_words
 
 
-# --- 穴埋めテキスト生成ロジック ---
-# ... (create_gap_text 関数は前回のコードから変更なし) ...
+# --- 穴埋めテキスト生成ロジック (変更なし) ---
 def create_gap_text(text, words_to_hide):
     correct_positions = []
     parts = re.split(r'(\b\w+\b)', text)
@@ -112,27 +110,26 @@ with st.sidebar:
     if "GEMINI_API_KEY" not in st.secrets:
          st.error("🔑 Streamlit CloudでSecretsを設定してください。")
          
-    # デフォルト値を15に変更
     num_words_to_extract = st.slider("抜き出す単語の数 (難易度調整)", min_value=1, max_value=25, value=15)
     
-    # 例文を空欄に変更
     user_input = st.text_area(
         "テスト用の英文を入力してください:", 
-        value="", # 例文を削除
+        value="", 
         height=150
     )
     
-    # テスト開始ボタン
     if st.button("テスト開始 / リセット", type="primary"):
         if not user_input.strip():
             st.warning("英文を入力してください。")
         elif "GEMINI_API_KEY" in st.secrets:
-            # 1. 状態をリセット
+            # 1. 状態をリセット (テスト開始前の状態へ)
             st.session_state.test_started = False
             st.session_state.score = None
             st.session_state.user_answers = {}
             st.session_state.correct_answers = []
             st.session_state.shuffled_words = []
+            st.session_state.gap_text_display = ""
+            st.session_state.feedback = []
             
             # 2. Gemini API呼び出し
             original_words, shuffled_words = get_word_info_from_gemini(user_input, num_words_to_extract)
@@ -148,15 +145,12 @@ with st.sidebar:
                 num_gaps = len(st.session_state.correct_answers)
                 st.session_state.user_answers = {f'main_select_{i}': "" for i in range(num_gaps)}
                 
-                # 成功した時のみrerunを呼ぶ
                 st.experimental_rerun()
-            else:
-                 # 失敗した場合は、エラーメッセージを表示し、rerunは呼ばない
-                 pass
+            # 失敗した場合は、エラーメッセージは関数内で表示されているため、ここでは何もしない。
 
 
 # --- メイン画面でのテスト表示と採点 ---
-# st.session_state.test_started と st.session_state.correct_answers が確実に存在する場合のみ実行
+# このブロックに入る前に必要なキーが全て定義されていることを保証 (アプリ冒頭の初期化で対応済み)
 if st.session_state.test_started and st.session_state.correct_answers:
     
     st.markdown("---")
@@ -169,6 +163,7 @@ if st.session_state.test_started and st.session_state.correct_answers:
     selection_options = [""] + st.session_state.shuffled_words
     displayed_text = st.session_state.gap_text_display
     
+    # ... (穴埋めUIのロジックは変更なし) ...
     for i in range(num_gaps):
         gap_marker = f'[GAP_{i}]'
         
@@ -220,7 +215,7 @@ if st.session_state.test_started and st.session_state.correct_answers:
         st.session_state.score = score
         st.session_state.feedback = feedback
         st.session_state.is_complete = is_complete
-        st.experimental_rerun() # 採点結果表示のためにrerun
+        st.experimental_rerun()
         
     if st.session_state.score is not None:
         st.markdown("### 採点結果")
