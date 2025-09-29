@@ -27,7 +27,7 @@ if 'feedback' not in st.session_state:
 if 'is_complete' not in st.session_state:
     st.session_state.is_complete = False
 
-# --- Gemini APIとの連携関数 (変更なし) ---
+# --- Gemini APIとの連携関数 (省略: 変更なし) ---
 def get_word_info_from_gemini(text, num_words):
     if "GEMINI_API_KEY" not in st.secrets:
         st.error("❌ Gemini APIキーが設定されていません。Streamlit CloudのSecretsを確認してください。")
@@ -65,7 +65,7 @@ def get_word_info_from_gemini(text, num_words):
         if not isinstance(extracted_words_from_api, list):
             raise ValueError("APIレスポンスが有効なリスト形式ではありません。")
     except Exception as e:
-        st.warning(f"⚠️ AIの回答解析に失敗しました。AIの回答: {response_text[:50]}... エラー詳細: {e}")
+        st.warning(f"⚠️ AIの回答解析に失敗しました。AIの回答: {response_text[:50]}...")
         return [], []
 
     all_words = re.findall(r'\b\w+\b', text)
@@ -82,7 +82,7 @@ def get_word_info_from_gemini(text, num_words):
     return final_extracted_words_original_order, shuffled_words
 
 
-# --- 穴埋めテキスト生成ロジック (変更なし) ---
+# --- 穴埋めテキスト生成ロジック (省略: 変更なし) ---
 def create_gap_text(text, words_to_hide):
     correct_positions = []
     parts = re.split(r'(\b\w+\b)', text)
@@ -106,11 +106,18 @@ def create_gap_text(text, words_to_hide):
     return final_gap_text, correct_positions
 
 
-# --- Streamlit ウィジェットのコールバック関数 (変更なし) ---
-def update_user_answer(index, selected_word):
+# --- Streamlit ウィジェットのコールバック関数 (修正) ---
+def update_user_answer(index):
     """
     特定の穴に対応するユーザーの回答をセッションステートに保存するコールバック。
+    index: 穴のインデックス (0, 1, 2, ...)
     """
+    widget_key = f'select_{index}'
+    
+    # ウィジェットのキーを参照して、現在の選択値を取得する (これが安全な方法)
+    selected_word = st.session_state[widget_key]
+    
+    # 回答データ用のセッションステートを更新
     st.session_state.user_answers[f'gap_{index}'] = selected_word
 
 # --- UIとテストの実行 ---
@@ -155,8 +162,7 @@ with st.sidebar:
                 num_gaps = len(st.session_state.correct_answers)
                 st.session_state.user_answers = {f'gap_{i}': "" for i in range(num_gaps)} 
                 
-                # 'st.experimental_rerun()' を 'st.rerun()' に変更
-                st.rerun() 
+                st.rerun() # st.experimental_rerun() から st.rerun() へ変更済み
             # 失敗した場合は、エラーメッセージは関数内で表示されているため、ここでは何もしない。
 
 
@@ -193,7 +199,8 @@ if st.session_state.test_started and st.session_state.correct_answers:
                  index=initial_index,
                  label_visibility='collapsed',
                  on_change=update_user_answer,
-                 args=(i, st.session_state[f'select_{i}']) 
+                 # ⚠️ 修正: 引数としてウィジェットの値ではなく、インデックスのみを渡す
+                 args=(i,) 
              )
              
         if len(parts_before_gap) > 1:
@@ -226,7 +233,6 @@ if st.session_state.test_started and st.session_state.correct_answers:
         st.session_state.feedback = feedback
         st.session_state.is_complete = is_complete
         
-        # 'st.experimental_rerun()' を 'st.rerun()' に変更
         st.rerun()
         
     if st.session_state.score is not None:
