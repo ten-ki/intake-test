@@ -1,146 +1,242 @@
-# app.py
-
 import streamlit as st
-import spacy
 import random
+import re
+from google import genai
+import ast # Geminiのレスポンス（リスト形式の文字列）をPythonリストに変換するために必要
 
-# --- アプリの基本設定 ---
-# @st.cache_resource は、時間のかかる処理を一度だけ実行するための「おまじない」です。
-@st.cache_resource
-def load_spacy_model():
-    """spaCyの英語モデルをロードします。"""
-    return spacy.load("en_core_web_sm")
+st.set_page_config(page_title="高校生向け 英語 文法/語彙テスト", layout="wide")
+st.title("🎓 英語の文法・語彙復習テスト (Gemini AI利用)")
+st.subheader("抜粋された文法的に重要な語句を正しい位置に戻すテストです。")
 
-# --- クイズを作るための関数（プログラムの部品） ---
-def create_interactive_quiz(text: str, num_to_extract: int):
-    """入力されたテキストから、クイズの問題を作成します。"""
-    nlp = load_spacy_model()
-    doc = nlp(text)
+# --- 初期化 ---
+if 'test_started' not in st.session_state:
+    st.session_state.test_started = False
+if 'score' not in st.session_state:
+    st.session_state.score = None
     
-    candidates = []
-    for token in doc:
-        if token.is_punct or token.is_space:
-            continue
-        
-        if (token.tag_ in ["WDT", "WP", "WP$"] or
-            (token.text.lower() == 'that' and token.dep_ in ['nsubj', 'dobj', 'mark']) or
-            token.pos_ == "ADP" or
-            token.tag_ == "VBG" or
-            (token.pos_ in ["VERB", "ADJ", "ADV"] and len(token.text) > 5)):
-            candidates.append(token)
+# --- Gemini APIとの連携関数 ---
 
-    if len(candidates) < num_to_extract:
-        st.warning(f"抜き出し可能な単語が {len(candidates)} 個しかなかったため、問題数を調整しました。")
-        num_to_extract = len(candidates)
-        if num_to_extract == 0:
-            return None, None
+def get_word_info_from_gemini(text, num_words):
+    """
+    Gemini APIを使用して、文章から重要な単語を抽出し、シャッフルされたリストと元の単語の位置を生成する。
+    """
     
-    extracted_tokens = {t.i: t for t in random.sample(candidates, num_to_extract)}
+    # 1. APIキーの取得とクライアント初期化
+    if "GEMINI_API_KEY" not in st.secrets:
+        st.error("Gemini APIキーが設定されていません。サイドバーの設定手順を確認してください。")
+        return [], []
+        
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        st.error(f"Geminiクライアントの初期化に失敗しました: {e}")
+        return [], []
 
-    problem_parts = []
-    last_idx = 0
-    for token_index in sorted(extracted_tokens.keys()):
-        problem_parts.append(doc[last_idx:token_index].text_with_ws)
-        problem_parts.append(token_index)
-        last_idx = token_index + 1
-    problem_parts.append(doc[last_idx:].text_with_ws)
+    # 2. プロンプト作成
+    # Geminiに対し、Pythonのリスト形式で単語を返すように明確に指示します。
+    prompt = (
+        f"以下の英文から、高校生レベルで文法的に重要な語（関係代名詞、分詞、高難度語彙など）を正確に{num_words}個、"
+        f"**他の文字を含めずに**Pythonのリスト形式（例: ['word1', 'word2', 'word3']）で抜き出して提供してください。\n\n"
+        f"英文: '{text}'"
+    )
 
-    return problem_parts, extracted_tokens
-
-# --- ボタンが押されたときの処理 ---
-def select_word(word_id: int):
-    st.session_state.selected_word = word_id
-
-def place_word(placeholder_id: int):
-    if st.session_state.selected_word is not None:
-        st.session_state.user_answers[placeholder_id] = st.session_state.selected_word
-        st.session_state.word_bank.pop(st.session_state.selected_word)
-        st.session_state.selected_word = None
-
-def unplace_word(placeholder_id: int):
-    word_id_to_return = st.session_state.user_answers.pop(placeholder_id)
-    st.session_state.word_bank[word_id_to_return] = st.session_state.correct_tokens[word_id_to_return]
-
-# --- ここからがアプリの見た目を作る部分 ---
-def main():
-    st.set_page_config(page_title="英文単語配置テスト", layout="wide")
-    st.title("📝 英文単語配置テスト")
-
-    with st.expander("📘 このアプリの使い方", expanded=True):
-        st.info("""
-            1. 英文と単語数を指定して「テストを生成する」をタップします。
-            2. 「単語バンク」から単語を1つタップして選びます。（選んだ単語は青色に変わります）
-            3. 文中の正しい場所 `[ ___ ]` をタップすると、単語が配置されます。
-            4. 間違えた単語は、もう一度タップすると単語バンクに戻せます。
-            5. 全部配置したら「採点する」で答え合わせ！
-        """)
+    # 3. APIの呼び出し
+    try:
+        with st.spinner("Gemini AIが重要な単語を選定中です..."):
+            response = client.models.generate_content(
+                model='gemini-2.5-flash', 
+                contents=prompt
+            )
+        response_text = response.text.strip()
+        
+    except Exception as e:
+        st.error(f"Gemini APIの呼び出し中にエラーが発生しました: {e}")
+        return [], []
     
-    st.header("1. テストを作成")
-    text_input = st.text_area("ここに英文を入力してください:", "The book which I bought yesterday is very interesting.", height=100)
-    num_to_extract = st.number_input("抜き出す単語の数:", min_value=1, max_value=20, value=3)
+    # 4. レスポンスの解析
+    try:
+        # APIのレスポンス（['word1', 'word2']という文字列）をPythonのリストに変換
+        extracted_words_from_api = ast.literal_eval(response_text)
+        if not isinstance(extracted_words_from_api, list):
+            raise ValueError("APIレスポンスが有効なリスト形式ではありません。")
+    except Exception as e:
+        st.warning(f"AIの回答解析に失敗しました。AIの回答: {response_text[:50]}...")
+        # フォールバックとして、レスポンス内の単語っぽいものを抽出する処理を入れることも可能
+        return [], []
 
-    if st.button("テストを生成する", type="primary", use_container_width=True):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        
-        problem_parts, correct_tokens = create_interactive_quiz(text_input, num_to_extract)
-        if problem_parts and correct_tokens:
-            st.session_state.quiz_started = True
-            st.session_state.problem_parts = problem_parts
-            st.session_state.correct_tokens = correct_tokens
-            st.session_state.word_bank = correct_tokens.copy()
-            st.session_state.user_answers = {}
-            st.session_state.selected_word = None
-            st.session_state.show_results = False
+    # 5. 抽出された単語を元の文章の順番に並べ替える
+    all_words = re.findall(r'\b\w+\b', text)
+    final_extracted_words_original_order = []
+    
+    # 大文字・小文字を区別しないセットを作成
+    api_words_lower = {w.lower() for w in extracted_words_from_api}
+    
+    for word in all_words:
+        if word.lower() in api_words_lower:
+             # 一度採用した単語はセットから除外し、重複を避ける（文法語抽出のため）
+            if word not in final_extracted_words_original_order:
+                final_extracted_words_original_order.append(word)
 
-    if st.session_state.get('quiz_started', False):
-        st.divider()
-        st.header("2. 問題に挑戦！")
-        
-        if st.session_state.word_bank:
-            st.subheader("単語バンク")
-            cols = st.columns(len(st.session_state.word_bank) or 1)
-            for i, (word_id, token) in enumerate(st.session_state.word_bank.items()):
-                btn_type = "primary" if st.session_state.selected_word == word_id else "secondary"
-                cols[i].button(token.text, key=f"word_{word_id}", on_click=select_word, args=(word_id,), type=btn_type, use_container_width=True)
+    # 6. シャッフルされたリストの生成
+    shuffled_words = final_extracted_words_original_order[:]
+    random.shuffle(shuffled_words)
+    
+    return final_extracted_words_original_order, shuffled_words
+
+# --- UIとテストロジック（前回のコードとほぼ同じ） ---
+
+def create_gap_text(text, words_to_hide):
+    # 穴埋めテキスト生成ロジックは省略（前回のコードと同じ）
+    gap_markers = {}
+    correct_positions = []
+    
+    parts = re.split(r'(\b\w+\b)', text)
+    gap_count = 0
+    new_parts = []
+    
+    # words_to_hideのコピーを作成し、大文字・小文字を区別せず処理するためのセットを用意
+    hide_set = {w.lower() for w in words_to_hide}
+    words_hidden_in_order = []
+    
+    for part in parts:
+        is_word = re.match(r'\b\w+\b', part)
+        if is_word and part.lower() in hide_set and part not in words_hidden_in_order:
+            marker = f'[GAP_{gap_count}]'
+            new_parts.append(marker)
+            correct_positions.append(part)
+            words_hidden_in_order.append(part) 
+            gap_count += 1
         else:
-            st.success("すべての単語を配置しました！下の「採点する」ボタンを押してください。")
+            new_parts.append(part)
+    
+    final_gap_text = "".join(new_parts)
+    return final_gap_text, correct_positions
 
-        st.subheader("問題文")
-        # st.columnsを使って、テキストとボタンを横並びにする
-        cols = st.columns(len(st.session_state.problem_parts))
-        for i, part in enumerate(st.session_state.problem_parts):
-            with cols[i]:
-                if isinstance(part, str):
-                    st.markdown(f"<div style='margin-top: 0.5rem;'>{part}</div>", unsafe_allow_html=True)
-                else:
-                    placeholder_id = part
-                    if placeholder_id in st.session_state.user_answers:
-                        word_id = st.session_state.user_answers[placeholder_id]
-                        st.button(f"**{st.session_state.correct_tokens[word_id].text}**", key=f"placed_{placeholder_id}", on_click=unplace_word, args=(placeholder_id,))
-                    else:
-                        st.button("[&nbsp;&nbsp;]", key=f"placeholder_{placeholder_id}", on_click=place_word, args=(placeholder_id,), disabled=(st.session_state.selected_word is None))
-
-        st.divider()
-        if not st.session_state.word_bank:
-            if st.button("採点する", type="primary", use_container_width=True):
-                st.session_state.show_results = True
-
-        if st.session_state.get('show_results', False):
-            st.header("3. 採点結果")
-            correct_count = 0
-            total = len(st.session_state.correct_tokens)
+# サイドバーでの設定とテスト開始ボタン
+with st.sidebar:
+    st.header("設定")
+    if "GEMINI_API_KEY" not in st.secrets:
+         st.error("🔑 必須: Streamlit SecretsにGEMINI_API_KEYを設定してください。")
+         st.markdown("ローカル (`.streamlit/secrets.toml`) または Streamlit Cloud で設定が必要です。")
+         
+    num_words_to_extract = st.slider("抜き出す単語の数", min_value=1, max_value=5, value=3)
+    
+    default_text = (
+        "Despite the heavy rain, the students continued their research, "
+        "consequently having sophisticated data which was necessary for their report."
+    )
+    user_input = st.text_area(
+        "テスト用の英文を入力してください:", 
+        value=default_text, 
+        height=150
+    )
+    
+    if st.button("テスト開始 / リセット", type="primary"):
+        if "GEMINI_API_KEY" in st.secrets:
+            # テストの初期化
+            st.session_state.test_started = True
+            st.session_state.score = None
+            st.session_state.user_answers = {}
             
-            for placeholder_id, correct_token in st.session_state.correct_tokens.items():
-                if st.session_state.user_answers.get(placeholder_id) == placeholder_id:
-                    correct_count += 1
+            # --- Gemini API呼び出し ---
+            original_words, st.session_state.shuffled_words = get_word_info_from_gemini(user_input, num_words_to_extract)
             
-            st.subheader(f"正解率: {correct_count} / {total}")
-            if correct_count == total:
-                st.balloons()
-                st.success("🎉 パーフェクト！おめでとうございます！")
+            if original_words:
+                st.session_state.gap_text_display, st.session_state.correct_answers = create_gap_text(
+                    user_input, 
+                    original_words
+                )
+                # 穴の数だけ回答用辞書を初期化
+                st.session_state.user_answers = {f'main_select_{i}': "" for i in range(len(st.session_state.correct_answers))}
             else:
-                st.warning("間違えたところを確認してみましょう！")
+                st.session_state.test_started = False
+                st.warning("単語を抽出できませんでした。英文を見直すか、API設定を確認してください。")
 
-if __name__ == "__main__":
-    main()
+            st.experimental_rerun()
+
+
+# --- メイン画面でのテスト表示と採点ロジック（省略。前回のコードを流用） ---
+if st.session_state.test_started and st.session_state.correct_answers:
+    # ... (前回のコードの「メイン画面でのテスト表示」部分をここに挿入) ...
+    st.markdown("---")
+    st.markdown("### 1. 抜き出された単語")
+    st.info(f"使用できる単語: {' / '.join(st.session_state.shuffled_words)}")
+
+    st.markdown("### 2. 穴埋め文章")
+    
+    num_gaps = len(st.session_state.correct_answers)
+    selection_options = [""] + st.session_state.shuffled_words
+    displayed_text = st.session_state.gap_text_display
+    
+    for i in range(num_gaps):
+        gap_marker = f'[GAP_{i}]'
+        
+        parts_before_gap = displayed_text.split(gap_marker, 1)
+        
+        st.markdown(parts_before_gap[0], unsafe_allow_html=True)
+        
+        col1, col2 = st.columns([1, 10])
+        with col1:
+             st.markdown(f"**[{i+1}]**")
+        with col2:
+             # 初期値の設定
+             initial_index = 0
+             current_answer = st.session_state.user_answers.get(f'main_select_{i}', "")
+             try:
+                 initial_index = selection_options.index(current_answer)
+             except ValueError:
+                 initial_index = 0
+
+             selected_word = st.selectbox(
+                 "選択", 
+                 options=selection_options,
+                 key=f'main_select_{i}',
+                 index=initial_index,
+                 label_visibility='collapsed'
+             )
+             st.session_state.user_answers[f'main_select_{i}'] = selected_word
+             
+        if len(parts_before_gap) > 1:
+            displayed_text = parts_before_gap[1]
+
+    st.markdown(displayed_text)
+    
+    st.markdown("---")
+
+    if st.button("採点する", key='score_button'):
+        score = 0
+        feedback = []
+        is_complete = True
+        
+        for i, correct_word in enumerate(st.session_state.correct_answers):
+            user_word = st.session_state.user_answers.get(f'main_select_{i}')
+            
+            if not user_word:
+                feedback.append(f"穴 {i+1} : **未回答**")
+                is_complete = False
+                continue
+                
+            if user_word == correct_word:
+                score += 1
+                feedback.append(f"穴 {i+1} ({correct_word}) : **正解** ✅")
+            else:
+                feedback.append(f"穴 {i+1} ({user_word}) : **不正解** ❌ (正解: {correct_word})")
+        
+        st.session_state.score = score
+        st.session_state.feedback = feedback
+        st.session_state.is_complete = is_complete
+        st.experimental_rerun()
+        
+    if st.session_state.score is not None:
+        st.markdown("### 採点結果")
+        
+        if st.session_state.is_complete:
+            st.success(f"あなたのスコア: {st.session_state.score} / {num_gaps} 問正解！")
+        else:
+            st.warning("未回答の穴があります。")
+        
+        st.markdown("\n".join(st.session_state.feedback))
+        
+else:
+    st.info("サイドバーに英文を入力し、「テスト開始」ボタンを押してください。")
